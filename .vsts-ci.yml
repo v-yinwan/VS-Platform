@@ -1,0 +1,235 @@
+queue:
+  name: VSEng-MicroBuildVS2017
+  timeoutInMinutes: 300
+
+steps:
+- task: PowerShell@2
+  displayName: Set VSTS variables
+  inputs:
+    targetType: inline
+    script: |
+      if ($env:SignType -eq 'Real') {
+        $feedGuid = '09d8d03c-1ac8-456e-9274-4d2364527d99'
+      } else {
+        $feedGuid = 'da484c78-f942-44ef-b197-99e2a1bef53c'
+      }
+
+      Write-Host "##vso[task.setvariable variable=feedGuid]$feedGuid"
+
+      if ($env:ComputerName.StartsWith('factoryvm', [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "Running on hosted queue"
+        Write-Host "##vso[task.setvariable variable=Hosted]true"
+      }
+
+- task: CmdLine@2
+  inputs:
+    script: |
+      del /s /q "%userprofile%\.nuget\packages"
+      del /s /q "%LocalAppData%\NuGet\Cache"
+      del /s /q "%AppData%\tsd-cache"
+  displayName: Purge package caches
+  condition: and(succeeded(), ne(variables['Hosted'], 'true'))
+
+- task: PowerShell@2
+  inputs:
+    filePath: src\_release\variables\_vsts.ps1
+    failOnStderr: true
+  displayName: Set VSTS variables based on source
+
+- task: NuGetToolInstaller@0
+  inputs:
+    versionSpec: 4.0.0
+  displayName: Pin nuget.exe version
+
+- task: MicroBuildIBCMergePlugin@0
+  inputs:
+    branch: $(IBCMergeBranch)
+  displayName: Install MicroBuild IBCMerge plugin
+  condition: and(succeeded(), ne(variables['Hosted'], 'true'))
+
+- task: MicroBuildLocalizationPlugin@1
+  inputs:
+    languages: $(LocLanguages)
+  displayName: Install MicroBuild Localization plugin
+
+- task: MicroBuildSigningPlugin@1
+  inputs:
+    signType: $(SignType)
+    esrpSigning: true
+    zipSources: false
+  displayName: Install MicroBuild Signing plugin
+
+- task: MicroBuildSwixPlugin@1
+  inputs:
+    dropName: $(VstsDropNames)
+  displayName: Install MicroBuild Swix plugin
+
+- task: MicroBuildFXCopPlugin@1
+  displayName: Install MicroBuild FxCop plugin
+
+- task: PowerShell@2
+  inputs:
+    filePath: init.ps1
+    arguments: -Verbose
+  displayName: Restore packages
+
+- task: PowerShell@2
+  inputs:
+    filePath: build.ps1
+    arguments: -Setup -Configuration $(BuildConfiguration)
+  displayName: Build
+
+- task: MicroBuildCodesignVerify@1
+  inputs:
+    TargetFolder: $(Build.SourcesDirectory)\bin\Packages\$(BuildConfiguration)
+    WhiteListPathForCerts: $(Build.SourcesDirectory)\src\_build\no_authenticode.txt
+    WhiteListPathForSigs: $(Build.SourcesDirectory)\src\_build\no_strongname.txt
+  displayName: Verify code signing
+
+- task: VSTest@2
+  inputs:
+    testFiltercriteria: TestCategory!=FailsInCloudTest
+    searchFolder: $(System.DefaultWorkingDirectory)\bin\Editor
+    testAssemblyVer2: |
+      **\*tests*.dll
+      !**\obj\**
+      !**\*.RunsVs.*
+    platform: $(BuildPlatform)
+    configuration: $(BuildConfiguration)
+  displayName: Test editor
+  condition: and(succeeded(), ne(variables['SignType'], 'real'))
+
+- task: VSTest@2
+  inputs:
+    testFiltercriteria: TestCategory!=FailsInCloudTest
+    searchFolder: $(System.DefaultWorkingDirectory)\bin\ConnectedServices
+    testAssemblyVer2: |
+      **\*tests*.dll
+      !**\obj\**
+      !**\*.RunsVs.*
+    platform: $(BuildPlatform)
+    configuration: $(BuildConfiguration)
+  displayName: Test Connected Services
+  condition: and(succeeded(), ne(variables['SignType'], 'real'))
+
+- task: VSTest@2
+  inputs:
+    testFiltercriteria: TestCategory!=FailsInCloudTest
+    searchFolder: $(System.DefaultWorkingDirectory)\bin\Experiments
+    testAssemblyVer2: |
+      **\*tests*.dll
+      !**\obj\**
+      !**\*.RunsVs.*
+    platform: $(BuildPlatform)
+    configuration: $(BuildConfiguration)
+  displayName: Test Experiments
+  condition: and(succeeded(), ne(variables['SignType'], 'real'))
+
+- task: VSTest@2
+  inputs:
+    testFiltercriteria: TestCategory!=FailsInCloudTest
+    searchFolder: $(System.DefaultWorkingDirectory)\bin\Identity
+    testAssemblyVer2: |
+      **\*tests*.dll
+      !**\obj\**
+      !**\*.RunsVs.*
+    platform: $(BuildPlatform)
+    configuration: $(BuildConfiguration)
+  displayName: Test Identity
+  condition: and(succeeded(), ne(variables['SignType'], 'real'))
+
+- task: VSTest@2
+  inputs:
+    testFiltercriteria: TestCategory!=FailsInCloudTest
+    searchFolder: $(System.DefaultWorkingDirectory)\bin\Shell
+    testAssemblyVer2: |
+      **\*tests*.dll
+      !**\obj\**
+      !**\*.RunsVs.*
+    platform: $(BuildPlatform)
+    configuration: $(BuildConfiguration)
+  displayName: Test Shell
+  condition: and(succeeded(), ne(variables['SignType'], 'real'))
+
+- task: MicroBuildCleanup@1
+  displayName: MicroBuild cleanup
+  condition: succeededOrFailed()
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: $(Build.ArtifactStagingDirectory)/MicroBuild/ESRPClient
+    ArtifactName: esrpclient_logs
+    ArtifactType: Container
+  displayName: 'Publish Artifact: ESRP signing logs'
+  condition: eq(variables['SignType'], 'real')
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: bin/build_logs/$(BuildConfiguration)
+    ArtifactName: build_logs
+    ArtifactType: Container
+  displayName: 'Publish Artifact: build logs'
+  condition: succeededOrFailed()
+
+## Publish tasks that only run on CI follow
+
+- task: PowerShell@2
+  inputs:
+    filePath: src\_release\variables\_vsts.ps1
+    failOnStderr: true
+  displayName: Update VSTS variables based on build outputs
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+- task: PowerShell@2
+  inputs:
+    filePath: src\_release\artifacts\_vsts.ps1
+  displayName: Publish artifacts
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+- task: ms-vseng.MicroBuildTasks.0e9d0d4d-71ec-4e4e-ae40-db9896f1ae74.MicroBuildBuildVSBootstrapper@1
+  inputs:
+    channelName: $(TestBootstrapperChannel)
+    manifests: $(SetupManifests)
+    outputFolder: $(Build.Repository.LocalPath)\bin\Packages\$(BuildConfiguration)\VSIX
+  displayName: Build VS bootstrapper
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), ne(variables['TestBootstrapperChannel'], ''))
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: $(Build.StagingDirectory)\MicroBuild\Output
+    ArtifactName: MicroBuildOutputs
+    ArtifactType: Container
+  displayName: 'Publish Artifact: MicroBuildOutputs'
+  condition: succeededOrFailed()
+
+- task: NuGetCommand@2
+  inputs:
+    command: push
+    searchPatternPush: bin\Packages\$(BuildConfiguration)\NuGet\*.nupkg
+    publishVstsFeed: $(feedGuid)
+    allowPackageConflicts: true
+  displayName: Publish NuGet packages to VSTS feeds
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+- task: PublishSymbols@2
+  inputs:
+    SymbolsFolder: $(Build.ArtifactStagingDirectory)/symbols
+    SearchPattern: '**/*.pdb'
+    IndexSources: false
+    SymbolServerType: TeamServices
+  displayName: Archive symbols to VSTS
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+- task: MicroBuildUploadVstsDropFolder@1
+  inputs:
+    DropFolder: $(DropFolder)
+    DropName: $(VstsDropNames)
+  displayName: Publish product components to VSTS drop
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+- task: MicroBuildUploadVstsDropFolder@1
+  inputs:
+    DropFolder: bin/AzureDTLTests
+    DropName: Tests/$(System.TeamProject)/$(Build.Repository.Name)/$(Build.SourceBranchName)/$(Build.BuildId)/AzureDTLTests
+  displayName: Publish Azure DTL tests to VSTS drop
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
